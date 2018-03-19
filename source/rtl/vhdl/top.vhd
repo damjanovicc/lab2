@@ -23,6 +23,8 @@ entity top is
   port (
     clk_i          : in  std_logic;
     reset_n_i      : in  std_logic;
+    direct_mode_i  : in  std_logic;
+    display_mode_i : in  std_logic_vector (1 downto 0);
     -- vga
     vga_hsync_o    : out std_logic;
     vga_vsync_o    : out std_logic;
@@ -121,6 +123,31 @@ architecture rtl of top is
   );
   end component;
   
+  	component reg is
+  	 generic(
+  		WIDTH    : positive := 20;
+  		RST_INIT : integer := 0
+  	);
+  	port(
+  		i_clk  				: in  std_logic;
+  		in_rst 				: in  std_logic;
+  		i_d    				: in  std_logic_vector(WIDTH-1 downto 0);
+  		o_q    				: out std_logic_vector(WIDTH-1 downto 0)
+  	);
+  	end component;
+  
+  component clk_counter IS 
+	
+	GENERIC(max_cnt : STD_LOGIC_VECTOR(25 DOWNTO 0) := "10111110101111000010000000" -- 50 000 000
+            );
+   PORT   (clk_i     : IN  STD_LOGIC; -- ulazni takt
+           rst_i     : IN  STD_LOGIC; -- reset signal
+           cnt_en_i  : IN  STD_LOGIC; -- signal dozvole brojanja
+           one_sec_o : OUT STD_LOGIC  -- izlaz koji predstavlja proteklu jednu sekundu vremena
+             );
+END component;
+  
+  
   
   constant update_period     : std_logic_vector(31 downto 0) := conv_std_logic_vector(1, 32);
   
@@ -156,8 +183,20 @@ architecture rtl of top is
   signal dir_blue            : std_logic_vector(7 downto 0);
   signal dir_pixel_column    : std_logic_vector(10 downto 0);
   signal dir_pixel_row       : std_logic_vector(10 downto 0);
+  
+  signal rainbow 				  : std_logic_vector(23 downto 0);
+  signal char_addr_next		  : std_logic_vector(19 downto 0);
+  signal char_addr_r			  : std_logic_vector(19 downto 0);
+  signal pixel_addr_next	  : std_logic_vector(19 downto 0);
+  signal pixel_addr_r		  : std_logic_vector(19 downto 0);
+  
+  signal start_pointer_next  : std_logic_vector(19 downto 0);
+  signal start_pointer_r	  : std_logic_vector(19 downto 0);
+  
+  signal s_one_sec			  : std_logic;
 
 begin
+
 
   -- calculate message lenght from font size
   message_lenght <= conv_std_logic_vector(MEM_SIZE/64, MEM_ADDR_WIDTH)when (font_size = 3) else -- note: some resolution with font size (32, 64)  give non integer message lenght (like 480x640 on 64 pixel font size) 480/64= 7.5
@@ -168,11 +207,11 @@ begin
   graphics_lenght <= conv_std_logic_vector(MEM_SIZE*8*8, GRAPH_MEM_ADDR_WIDTH);
   
   -- removed to inputs pin
-  direct_mode <= '1';
-  display_mode     <= "10";  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
+  -- direct_mode <= '0';
+  -- display_mode <= "01";  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
   
   font_size        <= x"1";
-  show_frame       <= '1';
+  show_frame       <= '0';
   foreground_color <= x"FFFFFF";
   background_color <= x"000000";
   frame_color      <= x"FF0000";
@@ -211,14 +250,14 @@ begin
     clk_i              => clk_i,
     reset_n_i          => reset_n_i,
     --
-    direct_mode_i      => direct_mode,
+    direct_mode_i      => direct_mode_i,
     dir_red_i          => dir_red,
     dir_green_i        => dir_green,
     dir_blue_i         => dir_blue,
     dir_pixel_column_o => dir_pixel_column,
     dir_pixel_row_o    => dir_pixel_row,
     -- cfg
-    display_mode_i     => display_mode,  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
+    display_mode_i     => display_mode_i,  -- 01 - text mode, 10 - graphics mode, 11 - text & graphics
     -- text mode interface
     text_addr_i        => char_address,
     text_data_i        => char_value,
@@ -245,21 +284,106 @@ begin
     green_o            => green_o,
     blue_o             => blue_o     
   );
-  
-  -- na osnovu signala iz vga_top modula dir_pixel_column i dir_pixel_row realizovati logiku koja genereise
-  --dir_red
-  --dir_green
-  --dir_blue
  
-  -- koristeci signale realizovati logiku koja pise po TXT_MEM
-  --char_address
-  --char_value
-  --char_we
+  one_sec_reg:clk_counter
+  PORT MAP   (clk_i     => pix_clock_s, 
+          rst_i     => vga_rst_n_s,
+          cnt_en_i  => '1', 
+          one_sec_o => s_one_sec
+             );
+
+  char_addr_reg: reg 
+  PORT MAP (	
+ 	i_clk  => pix_clock_s,
+ 	in_rst => vga_rst_n_s,
+ 	i_d    => char_addr_next,
+ 	o_q    => char_addr_r
+  );
+	
+  pixel_addr_reg: reg 
+  PORT MAP (	
+		i_clk  => pix_clock_s,
+		in_rst => vga_rst_n_s,
+		i_d    => pixel_addr_next,
+		o_q    => pixel_addr_r
+	);
+
+  start_pointer_reg: reg 
+  PORT MAP (	
+		i_clk  => pix_clock_s,
+		in_rst => vga_rst_n_s,
+		i_d    => start_pointer_next,
+		o_q    => start_pointer_r
+	);
+
   
-  -- koristeci signale realizovati logiku koja pise po GRAPH_MEM
-  --pixel_address
-  --pixel_value
-  --pixel_we
+  rainbow <= x"ffffff" when ((dir_pixel_column >= 0) 	 and (dir_pixel_column < 80))  else
+				 x"eff707" when ((dir_pixel_column >= 80)  and (dir_pixel_column < 160)) else
+				 x"07d7f7" when ((dir_pixel_column >= 160) and (dir_pixel_column < 240)) else
+				 x"00db3e" when ((dir_pixel_column >= 240) and (dir_pixel_column < 320)) else
+				 x"db00bd" when ((dir_pixel_column >= 320) and (dir_pixel_column < 400)) else
+				 x"db0000" when ((dir_pixel_column >= 400) and (dir_pixel_column < 480)) else
+				 x"2f00bf" when ((dir_pixel_column >= 480) and (dir_pixel_column < 560)) else
+				 x"000000" when ((dir_pixel_column >= 560) and (dir_pixel_column < 320)) else
+				 x"000000";
+				 
+  dir_red 	<= rainbow(23 downto 16);
+  dir_green <= rainbow(15 downto 8);
+  dir_blue 	<= rainbow(7 downto 0);
+ 
+  -- text mode 
+  char_we <= '1';
+ 
+						
+  char_addr_next <= char_addr_r + 1 	when char_we='1' and char_addr_r < 4800 else
+						  x"00000" 	 			when char_we='1' and char_addr_r = 4800 else
+						  char_addr_r;
+							
+  char_address <= char_addr_r(13 downto 0);
+						
+  char_value <= "00" & x"D" when char_address = "00000000000000" + start_pointer_r else	-- M
+					 "00" & x"9" when char_address = "00000000000001" + start_pointer_r else	-- I
+					 "00" & x"C" when char_address = "00000000000010" + start_pointer_r else	-- L
+					 "00" & x"9" when char_address = "00000000000011" + start_pointer_r else	-- I
+					 "00" & x"3" when char_address = "00000000000100" + start_pointer_r else	-- C
+					 "00" & x"1" when char_address = "00000000000101" + start_pointer_r else	-- A
+					 "10" & x"0" when char_address = "00000000000110" + start_pointer_r else	-- razmak
+					 "00" & x"4" when char_address = "00000000000111" + start_pointer_r else	-- D
+					 "00" & x"1" when char_address = "00000000001000" + start_pointer_r else	-- A
+					 "00" & x"D" when char_address = "00000000001001" + start_pointer_r else	-- M
+					 "00" & x"A" when char_address = "00000000001010" + start_pointer_r else	-- J
+					 "00" & x"1" when char_address = "00000000001011" + start_pointer_r else	-- A
+					 "00" & x"E" when char_address = "00000000001100" + start_pointer_r else	-- N
+					 "00" & x"F" when char_address = "00000000001101" + start_pointer_r else	-- O
+					 "01" & x"6" when char_address = "00000000001110" + start_pointer_r else	-- V
+					 "00" & x"9" when char_address = "00000000001111" + start_pointer_r else	-- I
+					 "00" & x"3" when char_address = "00000000010000" + start_pointer_r else	-- C
+					 "100000";	
+					  
+  -- graphics mode
+  pixel_we <= '1';
   
-  
+  pixel_addr_next <= pixel_addr_r + 1    when pixel_we='1' and pixel_addr_r < 9600 else
+							x"00000" 	  		  when pixel_we='1' and pixel_addr_r = 9600 else
+							pixel_addr_r;
+							
+  pixel_address <= pixel_addr_r;
+ 
+  pixel_value <= x"FFFFFFFF"  when pixel_address = 3 	+ start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 23 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 43 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 63	+ start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 83 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 103 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 123 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 143 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 163 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 183 + start_pointer_r 	else
+					  x"FFFFFFFF"  when pixel_address = 203 + start_pointer_r 	else
+					  "00000000000000000000000000000000";
+ 
+  start_pointer_next <= start_pointer_r + 1 	   when s_one_sec = '1' and start_pointer_r < 50 else 
+							   x"00000" 				 	when s_one_sec = '1' and start_pointer_r = 50 else
+							   start_pointer_r;
+ 
 end rtl;
